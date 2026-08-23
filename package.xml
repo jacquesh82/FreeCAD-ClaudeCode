@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
+  <name>Claude Code</name>
+  <description>Dockable chat panel connected to Claude Code (subscription auth) — an AI agent that drives FreeCAD for you</description>
+  <version>0.1.0</version>
+  <date>2026-08-24</date>
+  <maintainer email="jacquesh82@users.noreply.github.com">jacquesh82</maintainer>
+  <license file="LICENSE">MIT</license>
+  <url type="repository" branch="main">https://github.com/jacquesh82/FreeCAD-ClaudeCode</url>
+  <icon>Resources/icons/claudecode.svg</icon>
+  <content>
+    <workbench>
+      <classname>ClaudeCodeWorkbench</classname>
+      <subdirectory>./</subdirectory>
+      <icon>Resources/icons/claudecode.svg</icon>
+    </workbench>
+  </content>
+  <freecadmin>1.0</freecadmin>
+</package>
