@@ -50,6 +50,13 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
         top.addWidget(QtWidgets.QLabel("Modèle :"))
         top.addWidget(self.model_combo)
         top.addStretch()
+        self.sketch_btn = QtWidgets.QPushButton("Croquis")
+        self.sketch_btn.setToolTip(
+            "Ouvrir le volet Croquis (onglet à côté du chat) : esquisses 2D "
+            "multi-vues que l'agent lit via get_sketch"
+        )
+        self.sketch_btn.clicked.connect(self._on_open_sketch)
+        top.addWidget(self.sketch_btn)
         self.new_btn = QtWidgets.QPushButton("Nouvelle conversation")
         self.new_btn.clicked.connect(self._on_new_conversation)
         top.addWidget(self.new_btn)
@@ -72,7 +79,7 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
         )
         self.skip_perms.setToolTip(
             "Par défaut, seuls les outils FreeCAD (exec_python, get_scene, "
-            "screenshot) sont autorisés. Cette case active "
+            "screenshot, get_sketch) sont autorisés. Cette case active "
             "--dangerously-skip-permissions."
         )
         layout.addWidget(self.skip_perms)
@@ -101,7 +108,7 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
         self._append_html(
             "<i>Connecté via ton abonnement Claude Code (CLI <code>claude</code>). "
             "L'agent dispose des outils FreeCAD : exec_python, get_scene, "
-            "screenshot.</i>"
+            "screenshot, get_sketch (volet Croquis).</i>"
         )
 
     # --- affichage --------------------------------------------------------
@@ -122,6 +129,14 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
         self._append_html(
             "<p><b style='color:#2266cc;'>Toi :</b> %s</p>" % html.escape(prompt)
         )
+        try:
+            from . import sketch
+
+            hint = sketch.prompt_hint()
+        except Exception:
+            hint = ""
+        if hint:
+            prompt += "\n\n" + hint
         model = self.model_combo.currentText()
         self.runner.send_prompt(
             prompt,
@@ -131,6 +146,11 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
         self.send_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.status.setText("Agent en cours d'exécution…")
+
+    def _on_open_sketch(self):
+        from . import sketch
+
+        sketch.show_panel()
 
     def _on_new_conversation(self):
         self.runner.stop()
@@ -180,6 +200,11 @@ def show_panel():
             )
             raise
         main_window.addDockWidget(QtCore.Qt.RightDockWidgetArea, _dock)
+        # Si le volet Croquis existe déjà, les regrouper en onglets.
+        from . import sketch
+
+        if sketch._dock is not None:
+            main_window.tabifyDockWidget(sketch._dock, _dock)
     _dock.show()
     _dock.raise_()
 

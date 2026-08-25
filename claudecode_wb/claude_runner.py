@@ -16,7 +16,11 @@ from PySide import QtCore
 SYSTEM_PROMPT = (
     "Tu es un agent qui pilote FreeCAD pour l'utilisateur, via les outils MCP "
     "'freecad' : exec_python (exécuter du Python dans la session FreeCAD), "
-    "get_scene (inspecter les documents/objets) et screenshot (voir la vue 3D). "
+    "get_scene (inspecter les documents/objets), screenshot (voir la vue 3D) "
+    "et get_sketch (lire le croquis 2D multi-vues dessiné par l'utilisateur "
+    "dans le volet Croquis). "
+    "Si l'utilisateur évoque un croquis ou une forme qu'il a dessinée, "
+    "appelle get_sketch avant de modéliser. "
     "Méthode : inspecte d'abord la scène, agis par petites étapes de code, "
     "appelle App.ActiveDocument.recompute() après chaque modification, puis "
     "vérifie visuellement avec screenshot quand c'est pertinent. "
@@ -93,7 +97,8 @@ class ClaudeRunner(QtCore.QObject):
         else:
             args += [
                 "--allowedTools",
-                "mcp__freecad__exec_python,mcp__freecad__get_scene,mcp__freecad__screenshot",
+                "mcp__freecad__exec_python,mcp__freecad__get_scene,"
+                "mcp__freecad__screenshot,mcp__freecad__get_sketch",
             ]
         if model:
             args += ["--model", model]

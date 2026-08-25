@@ -75,6 +75,8 @@ class FreeCADRpcServer:
             return self._op_screenshot(
                 int(request.get("width", 1280)), int(request.get("height", 800))
             )
+        if op == "sketch":
+            return self._op_sketch()
         return {"ok": False, "error": "opération inconnue : %r" % op}
 
     def _op_exec(self, code):
@@ -124,6 +126,17 @@ class FreeCADRpcServer:
         )
         Gui.ActiveDocument.ActiveView.saveImage(path, width, height, "White")
         return {"ok": True, "path": path}
+
+    def _op_sketch(self):
+        from . import sketch
+
+        data = sketch.get_sketch_json()
+        if not data:
+            return {
+                "ok": False,
+                "error": "Aucun croquis : le volet Croquis est vide ou fermé.",
+            }
+        return {"ok": True, "sketch": data}
 
 
 _instance = None

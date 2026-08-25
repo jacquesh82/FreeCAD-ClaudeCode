@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- Icône « Croquis » : formes esquissées + crayon -->
+  <rect x="6" y="10" width="24" height="20" rx="2" fill="none" stroke="#1d66cc" stroke-width="4"/>
+  <circle cx="44" cy="42" r="12" fill="none" stroke="#1d66cc" stroke-width="4"/>
+  <line x1="8" y1="52" x2="26" y2="38" stroke="#1d66cc" stroke-width="4" stroke-linecap="round"/>
+  <g transform="rotate(45 46 16)">
+    <rect x="41" y="4" width="10" height="20" rx="1.5" fill="#cc6a1d"/>
+    <path d="M41 24 L51 24 L46 32 Z" fill="#8a4712"/>
+  </g>
+</svg>

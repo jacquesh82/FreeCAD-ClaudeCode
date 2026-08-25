@@ -43,6 +43,23 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "get_sketch",
+        "description": (
+            "Récupère le croquis 2D dessiné par l'utilisateur dans le volet "
+            "« Croquis » de FreeCAD (JSON). Formes réparties par vue "
+            "orthographique (face, arrière, haut, bas, gauche, droite), "
+            "coordonnées [h, v] en mm, origine au centre de chaque vue ; "
+            "chaque vue fournit son mapping axes 2D -> 3D. Chaque forme porte "
+            "'nature' ('plein' = matière à ajouter, 'trou' = matière à "
+            "soustraire) et 'profondeur' (axe 3D, min, max) : son "
+            "épaisseur/extrusion le long du troisième axe. C'est l'intention "
+            "approximative de l'utilisateur : interprète les formes et "
+            "arrondis les cotes à des valeurs plausibles, ne reproduis pas "
+            "le tracé au dixième près."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "screenshot",
         "description": (
             "Capture la vue 3D active de FreeCAD et renvoie l'image (PNG) "
@@ -96,6 +113,11 @@ def handle_tool_call(name, args):
             resp = rpc_call({"op": "scene"})
             if resp.get("ok"):
                 return tool_result(resp.get("scene", ""))
+            return tool_result(resp.get("error", "erreur inconnue"), True)
+        if name == "get_sketch":
+            resp = rpc_call({"op": "sketch"})
+            if resp.get("ok"):
+                return tool_result(resp.get("sketch", ""))
             return tool_result(resp.get("error", "erreur inconnue"), True)
         if name == "screenshot":
             resp = rpc_call(

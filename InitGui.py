@@ -29,8 +29,9 @@ class ClaudeCodeWorkbench(Gui.Workbench):
     def Initialize(self):
         import claudecode_wb.commands  # noqa: F401  (enregistre les commandes)
 
-        self.appendToolbar("Claude Code", ["ClaudeCode_TogglePanel"])
-        self.appendMenu("&Claude Code", ["ClaudeCode_TogglePanel"])
+        commands = ["ClaudeCode_TogglePanel", "ClaudeCode_ToggleSketch"]
+        self.appendToolbar("Claude Code", commands)
+        self.appendMenu("&Claude Code", commands)
 
     def Activated(self):
         from claudecode_wb import panel
