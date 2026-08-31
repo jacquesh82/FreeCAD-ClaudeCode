@@ -1,19 +1,23 @@
-"""Serveur RPC local exécuté DANS FreeCAD.
+"""Local RPC server running INSIDE FreeCAD.
 
-Écoute sur 127.0.0.1:<port aléatoire> via QTcpServer : les callbacks Qt tournent
-sur le thread GUI, donc le code Python reçu s'exécute directement dans le
-contexte FreeCAD sans problème de thread.
+Listens on 127.0.0.1:<random port> via QTcpServer. Qt callbacks run on the
+GUI thread, so the received Python code executes directly in the FreeCAD
+context with no threading issues.
 
-Protocole : une requête JSON par ligne, une réponse JSON par ligne.
-  {"op": "exec", "code": "..."}            -> {"ok": true, "stdout": "..."}
-  {"op": "scene"}                          -> {"ok": true, "scene": "..."}
-  {"op": "screenshot", "width": 1280, ...} -> {"ok": true, "path": "..."}
+Protocol: one JSON request per line, one JSON response per line. Every
+request must carry the per-session "token"; unauthorized requests are
+rejected without dispatching.
+  {"op": "exec", "token": "...", "code": "..."}            -> {"ok": true, "stdout": "..."}
+  {"op": "scene", "token": "..."}                          -> {"ok": true, "scene": "..."}
+  {"op": "screenshot", "token": "...", "width": 1280, ...} -> {"ok": true, "path": "..."}
 """
 
 import contextlib
+import hmac
 import io
 import json
 import os
+import secrets
 import tempfile
 import traceback
 
@@ -24,17 +28,22 @@ from PySide import QtNetwork
 
 class FreeCADRpcServer:
     def __init__(self):
+        self._token = secrets.token_urlsafe(32)
         self._server = QtNetwork.QTcpServer()
-        self._buffers = {}  # socket -> bytes en attente d'une fin de ligne
+        self._buffers = {}  # socket -> bytes waiting for a newline
         self._server.newConnection.connect(self._on_new_connection)
         if not self._server.listen(QtNetwork.QHostAddress.LocalHost, 0):
             raise RuntimeError(
-                "Impossible d'écouter en local : " + self._server.errorString()
+                "Cannot listen on localhost: " + self._server.errorString()
             )
 
     @property
     def port(self):
         return int(self._server.serverPort())
+
+    @property
+    def token(self):
+        return self._token
 
     def close(self):
         self._server.close()
@@ -66,6 +75,14 @@ class FreeCADRpcServer:
     # --- opérations -------------------------------------------------------
 
     def _dispatch(self, request):
+        supplied = request.get("token", "")
+        if not isinstance(supplied, str) or not hmac.compare_digest(
+            supplied.encode("utf-8"), self._token.encode("utf-8")
+        ):
+            App.Console.PrintWarning(
+                "[Claude Code Connector] rejected RPC request: bad token\n"
+            )
+            return {"ok": False, "error": "unauthorized: invalid or missing token"}
         op = request.get("op")
         if op == "exec":
             return self._op_exec(request.get("code", ""))
@@ -75,7 +92,7 @@ class FreeCADRpcServer:
             return self._op_screenshot(
                 int(request.get("width", 1280)), int(request.get("height", 800))
             )
-        return {"ok": False, "error": "opération inconnue : %r" % op}
+        return {"ok": False, "error": "unknown op: %r" % op}
 
     def _op_exec(self, code):
         import FreeCADGui as Gui
@@ -93,10 +110,10 @@ class FreeCADRpcServer:
         lines = []
         docs = App.listDocuments()
         if not docs:
-            lines.append("(aucun document ouvert)")
+            lines.append("(no open document)")
         for name, doc in docs.items():
-            active = " [actif]" if App.ActiveDocument is doc else ""
-            lines.append("Document %r%s — fichier: %s" % (name, active, doc.FileName or "(non enregistré)"))
+            active = " [active]" if App.ActiveDocument is doc else ""
+            lines.append("Document %r%s — file: %s" % (name, active, doc.FileName or "(unsaved)"))
             for obj in doc.Objects:
                 extra = ""
                 shape = getattr(obj, "Shape", None)
@@ -108,7 +125,7 @@ class FreeCADRpcServer:
                         )
                     except Exception:
                         pass
-                err = " !ERREUR" if obj.State and "Invalid" in [str(s) for s in obj.State] else ""
+                err = " !ERROR" if obj.State and "Invalid" in [str(s) for s in obj.State] else ""
                 lines.append(
                     "  - %s (Label=%r, Type=%s)%s%s" % (obj.Name, obj.Label, obj.TypeId, extra, err)
                 )
@@ -118,7 +135,7 @@ class FreeCADRpcServer:
         import FreeCADGui as Gui
 
         if Gui.ActiveDocument is None or Gui.ActiveDocument.ActiveView is None:
-            return {"ok": False, "error": "Aucune vue 3D active."}
+            return {"ok": False, "error": "No active 3D view."}
         path = os.path.join(
             tempfile.gettempdir(), "freecad_claude_screenshot.png"
         )
@@ -130,11 +147,12 @@ _instance = None
 
 
 def get_server():
-    """Retourne le serveur RPC (démarré paresseusement, singleton)."""
+    """Return the RPC server (lazily started, singleton)."""
     global _instance
     if _instance is None:
         _instance = FreeCADRpcServer()
         App.Console.PrintMessage(
-            "[Claude Code] Serveur RPC FreeCAD sur 127.0.0.1:%d\n" % _instance.port
+            "[Claude Code Connector] FreeCAD RPC server on 127.0.0.1:%d\n"
+            % _instance.port
         )
     return _instance

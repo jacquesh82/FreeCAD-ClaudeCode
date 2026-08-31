@@ -1,4 +1,4 @@
-"""Volet ancrable « Claude Code » : chat avec l'agent qui pilote FreeCAD."""
+"""Dockable "Claude Code Connector" panel: chat with the agent that drives FreeCAD."""
 
 import html
 
@@ -12,7 +12,7 @@ _dock = None
 
 
 class _PromptEdit(QtWidgets.QPlainTextEdit):
-    """Zone de saisie : Entrée envoie, Maj+Entrée insère un retour à la ligne."""
+    """Input area: Enter sends, Shift+Enter inserts a newline."""
 
     submitted = QtCore.Signal()
 
@@ -27,11 +27,11 @@ class _PromptEdit(QtWidgets.QPlainTextEdit):
 
 class ClaudeCodePanel(QtWidgets.QDockWidget):
     def __init__(self, parent=None):
-        super().__init__("Claude Code", parent)
+        super().__init__("Claude Code Connector", parent)
         self.setObjectName("ClaudeCodePanel")
 
         server = rpc_server.get_server()
-        self.runner = claude_runner.ClaudeRunner(server.port, parent=self)
+        self.runner = claude_runner.ClaudeRunner(server.port, server.token, parent=self)
         self.runner.text_received.connect(self._on_assistant_text)
         self.runner.tool_used.connect(self._on_tool_used)
         self.runner.turn_finished.connect(self._on_turn_finished)
@@ -42,53 +42,67 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        # Barre du haut : modèle + nouvelle conversation
+        # Top bar: model + new conversation
         top = QtWidgets.QHBoxLayout()
         self.model_combo = QtWidgets.QComboBox()
-        self.model_combo.addItems(["défaut", "sonnet", "opus", "haiku"])
-        self.model_combo.setToolTip("Modèle Claude à utiliser")
-        top.addWidget(QtWidgets.QLabel("Modèle :"))
+        self.model_combo.addItems(["default", "sonnet", "opus", "haiku"])
+        self.model_combo.setToolTip("Claude model to use")
+        top.addWidget(QtWidgets.QLabel("Model:"))
         top.addWidget(self.model_combo)
         top.addStretch()
-        self.new_btn = QtWidgets.QPushButton("Nouvelle conversation")
+        self.new_btn = QtWidgets.QPushButton("New conversation")
         self.new_btn.clicked.connect(self._on_new_conversation)
         top.addWidget(self.new_btn)
         layout.addLayout(top)
 
-        # Historique
+        # History
         self.history = QtWidgets.QTextBrowser()
         self.history.setOpenExternalLinks(True)
         self.history.setMinimumHeight(200)
         layout.addWidget(self.history, stretch=1)
 
-        # Statut
-        self.status = QtWidgets.QLabel("Prêt — port RPC FreeCAD : %d" % server.port)
+        # Status
+        self.status = QtWidgets.QLabel("Ready — FreeCAD RPC port: %d" % server.port)
         self.status.setStyleSheet("color: gray;")
         layout.addWidget(self.status)
 
-        # Option permissions
+        # Permissions option
         self.skip_perms = QtWidgets.QCheckBox(
-            "Autoriser tous les outils (fichiers, bash…) — à tes risques"
+            "Allow all tools (files, bash…) — at your own risk"
         )
         self.skip_perms.setToolTip(
-            "Par défaut, seuls les outils FreeCAD (exec_python, get_scene, "
-            "screenshot) sont autorisés. Cette case active "
-            "--dangerously-skip-permissions."
+            "By default only the FreeCAD tools (exec_python, get_scene, "
+            "screenshot) are allowed. Note that exec_python already runs "
+            "arbitrary Python inside FreeCAD with your permissions. This "
+            "checkbox enables --dangerously-skip-permissions, which also "
+            "grants file and shell access."
         )
         layout.addWidget(self.skip_perms)
 
-        # Saisie + boutons
+        # Data disclosure warning
+        disclosure = QtWidgets.QLabel(
+            "⚠ Each prompt you send may upload your design data to Anthropic: "
+            "scene contents (object names, file paths), screenshots of the 3D "
+            "view, and exec output are sent to the Claude API as tool results. "
+            "The agent can run arbitrary Python inside FreeCAD with your "
+            "permissions."
+        )
+        disclosure.setWordWrap(True)
+        disclosure.setStyleSheet("color: #8a6d3b;")
+        layout.addWidget(disclosure)
+
+        # Input + buttons
         self.prompt_edit = _PromptEdit()
         self.prompt_edit.setPlaceholderText(
-            "Demande à l'agent de modéliser quelque chose… (Entrée pour envoyer, "
-            "Maj+Entrée pour un retour à la ligne)"
+            "Ask the agent to model something… (Enter to send, "
+            "Shift+Enter for a newline)"
         )
         self.prompt_edit.setFixedHeight(70)
         self.prompt_edit.submitted.connect(self._on_send)
         layout.addWidget(self.prompt_edit)
 
         buttons = QtWidgets.QHBoxLayout()
-        self.send_btn = QtWidgets.QPushButton("Envoyer")
+        self.send_btn = QtWidgets.QPushButton("Send")
         self.send_btn.clicked.connect(self._on_send)
         self.stop_btn = QtWidgets.QPushButton("Stop")
         self.stop_btn.clicked.connect(self.runner.stop)
@@ -99,12 +113,14 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
 
         self.setWidget(body)
         self._append_html(
-            "<i>Connecté via ton abonnement Claude Code (CLI <code>claude</code>). "
-            "L'agent dispose des outils FreeCAD : exec_python, get_scene, "
-            "screenshot.</i>"
+            "<i>Connected via your Claude Code subscription (<code>claude</code> "
+            "CLI). The agent has the FreeCAD tools: exec_python, get_scene, "
+            "screenshot. Nothing is sent until you type a prompt; once you do, "
+            "tool results (scene data, screenshots, exec output) go to "
+            "Anthropic's API.</i>"
         )
 
-    # --- affichage --------------------------------------------------------
+    # --- display ----------------------------------------------------------
 
     def _append_html(self, fragment):
         self.history.append(fragment)
@@ -120,30 +136,30 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
             return
         self.prompt_edit.clear()
         self._append_html(
-            "<p><b style='color:#2266cc;'>Toi :</b> %s</p>" % html.escape(prompt)
+            "<p><b style='color:#2266cc;'>You:</b> %s</p>" % html.escape(prompt)
         )
         model = self.model_combo.currentText()
         self.runner.send_prompt(
             prompt,
-            model="" if model == "défaut" else model,
+            model="" if model == "default" else model,
             skip_permissions=self.skip_perms.isChecked(),
         )
         self.send_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
-        self.status.setText("Agent en cours d'exécution…")
+        self.status.setText("Agent running…")
 
     def _on_new_conversation(self):
         self.runner.stop()
         self.runner.reset_session()
         self.history.clear()
-        self._append_html("<i>Nouvelle conversation.</i>")
-        self.status.setText("Prêt")
+        self._append_html("<i>New conversation.</i>")
+        self.status.setText("Ready")
 
-    # --- signaux du runner ------------------------------------------------
+    # --- runner signals ---------------------------------------------------
 
     def _on_assistant_text(self, text):
         self._append_html(
-            "<p><b style='color:#cc6a1d;'>Claude :</b> %s</p>"
+            "<p><b style='color:#cc6a1d;'>Claude:</b> %s</p>"
             % html.escape(text).replace("\n", "<br>")
         )
 
@@ -155,7 +171,7 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
 
     def _on_error(self, message):
         self._append_html(
-            "<p style='color:#bb2222;'><b>Erreur :</b> %s</p>"
+            "<p style='color:#bb2222;'><b>Error:</b> %s</p>"
             % html.escape(message).replace("\n", "<br>")
         )
 
@@ -163,12 +179,12 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
         self.send_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.status.setText(
-            "Prêt — session %s" % (session_id[:8] + "…" if session_id else "(aucune)")
+            "Ready — session %s" % (session_id[:8] + "…" if session_id else "(none)")
         )
 
 
 def show_panel():
-    """Crée (au besoin) et affiche le volet dans la fenêtre principale."""
+    """Create (if needed) and show the panel in the main window."""
     global _dock
     main_window = Gui.getMainWindow()
     if _dock is None:
@@ -176,7 +192,7 @@ def show_panel():
             _dock = ClaudeCodePanel(main_window)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(
-                main_window, "Claude Code", "Échec du démarrage : %s" % exc
+                main_window, "Claude Code Connector", "Startup failed: %s" % exc
             )
             raise
         main_window.addDockWidget(QtCore.Qt.RightDockWidgetArea, _dock)

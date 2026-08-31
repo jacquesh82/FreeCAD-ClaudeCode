@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no" ?>
 <package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
-  <name>Claude Code</name>
+  <name>Claude Code Connector (unofficial)</name>
   <description>Dockable chat panel connected to Claude Code (subscription auth) — an AI agent that drives FreeCAD for you</description>
   <version>0.1.0</version>
   <date>2026-08-24</date>
@@ -15,5 +15,5 @@
       <icon>Resources/icons/claudecode.svg</icon>
     </workbench>
   </content>
-  <freecadmin>1.0</freecadmin>
+  <freecadmin>1.1</freecadmin>
 </package>

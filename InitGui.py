@@ -1,16 +1,16 @@
-# Enregistre le workbench "Claude Code" et la commande d'affichage du volet.
+# Registers the "Claude Code Connector (unofficial)" workbench and the panel command.
 #
-# ATTENTION : FreeCAD exécute ce fichier via exec() SANS définir __file__.
-# Tout chemin doit donc être calculé via un module importé (claudecode_wb).
+# NOTE: FreeCAD executes this file via exec() WITHOUT defining __file__.
+# Any path must therefore be computed through an imported module (claudecode_wb).
 
 import FreeCADGui as Gui
 
 
 class ClaudeCodeWorkbench(Gui.Workbench):
-    """Workbench minimal : son activation affiche le volet de chat Claude Code."""
+    """Minimal workbench: activating it shows the Claude Code chat panel."""
 
-    MenuText = "Claude Code"
-    ToolTip = "Agent IA Claude Code pilotant FreeCAD (abonnement Claude)"
+    MenuText = "Claude Code Connector (unofficial)"
+    ToolTip = "Unofficial AI agent panel driving FreeCAD via Claude Code (subscription auth)"
 
     def __init__(self):
         try:
@@ -24,13 +24,13 @@ class ClaudeCodeWorkbench(Gui.Workbench):
         except Exception as exc:
             import FreeCAD
 
-            FreeCAD.Console.PrintWarning("[Claude Code] icône introuvable : %s\n" % exc)
+            FreeCAD.Console.PrintWarning("[Claude Code Connector] icon not found: %s\n" % exc)
 
     def Initialize(self):
         import claudecode_wb.commands  # noqa: F401  (enregistre les commandes)
 
-        self.appendToolbar("Claude Code", ["ClaudeCode_TogglePanel"])
-        self.appendMenu("&Claude Code", ["ClaudeCode_TogglePanel"])
+        self.appendToolbar("Claude Code Connector", ["ClaudeCode_TogglePanel"])
+        self.appendMenu("&Claude Code Connector", ["ClaudeCode_TogglePanel"])
 
     def Activated(self):
         from claudecode_wb import panel
@@ -38,7 +38,7 @@ class ClaudeCodeWorkbench(Gui.Workbench):
         panel.show_panel()
 
     def Deactivated(self):
-        # Le volet reste visible dans les autres workbenches : ne rien fermer.
+        # The panel stays visible in other workbenches: close nothing.
         pass
 
     def GetClassName(self):

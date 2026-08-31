@@ -1,4 +1,4 @@
-"""Commandes GUI de l'addon Claude Code."""
+"""GUI commands for the Claude Code Connector addon."""
 
 import os
 
@@ -13,8 +13,8 @@ class ToggleClaudePanelCommand:
     def GetResources(self):
         return {
             "Pixmap": _ICON,
-            "MenuText": "Volet Claude Code",
-            "ToolTip": "Afficher/masquer le volet de l'agent Claude Code",
+            "MenuText": "Claude Code Connector panel",
+            "ToolTip": "Show/hide the Claude Code Connector agent panel",
         }
 
     def Activated(self):

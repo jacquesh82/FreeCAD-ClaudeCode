@@ -1,9 +1,11 @@
-"""Addon FreeCAD « Claude Code » : volet de chat pilotant un agent Claude Code.
+"""FreeCAD addon "Claude Code Connector (unofficial)": a chat panel driving a
+Claude Code agent that operates FreeCAD.
 
-Architecture :
-  panel.py         volet Qt (QDockWidget) — chat, envoi des prompts
-  claude_runner.py QProcess autour du CLI `claude -p --output-format stream-json`
-  rpc_server.py    serveur TCP local DANS FreeCAD (thread GUI) qui exécute du Python
-  mcp_bridge.py    serveur MCP stdio autonome lancé par Claude Code ; relaie les
-                   appels d'outils vers rpc_server via TCP
+Architecture:
+  panel.py         Qt dock panel (QDockWidget) — chat, prompt submission
+  claude_runner.py QProcess wrapper around the `claude -p --output-format stream-json` CLI
+  rpc_server.py    local TCP server INSIDE FreeCAD (GUI thread) executing Python;
+                   requires a per-session token on every request
+  mcp_bridge.py    standalone stdio MCP server launched by Claude Code; forwards
+                   tool calls to rpc_server over TCP
 """
