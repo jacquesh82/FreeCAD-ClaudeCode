@@ -1,5 +1,7 @@
 # Claude Code Connector for FreeCAD (unofficial)
 
+[![Tests](https://github.com/jacquesh82/FreeCAD-ClaudeCode/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/jacquesh82/FreeCAD-ClaudeCode/actions/workflows/tests.yml)
+
 An unofficial FreeCAD (≥ 1.1) addon that adds a dockable **AI agent chat
 panel**: an AI agent that drives FreeCAD for you — creating objects, editing
 documents, inspecting the scene, and visually checking its own work with
@@ -127,7 +129,17 @@ required FreeCAD version (≥ 1.1), the agent CLIs (`claude` and/or ZCode —
 warning only if both are missing) and a Python interpreter for the MCP
 bridge, then installs the addon (symlink on Linux/macOS, copy on Windows).
 
-### Installing a missing agent CLI
+```bash
+git clone https://github.com/jacquesh82/FreeCAD-ClaudeCode.git
+cd FreeCAD-ClaudeCode
+./install.sh                 # Linux/macOS
+install.bat                  # Windows
+```
+
+Options: `--mod-dir <path>` if auto-detection fails, `--copy` to force a
+copy instead of a symlink, `--uninstall` to remove the addon.
+
+#### Installing a missing agent CLI
 
 When an agent CLI is missing, the installer offers to install it
 (interactive `y/N` prompt — auto-skipped when not run in a terminal). You
@@ -150,16 +162,6 @@ Manual equivalents: Claude Code — see
 [the docs](https://code.claude.com/docs/en/setup); ZCode Desktop — download
 from [zcode.z.ai](https://zcode.z.ai/en/docs/install) (`.AppImage`, `.deb`
 or `.rpm`).
-
-```bash
-git clone https://github.com/jacquesh82/FreeCAD-ClaudeCode.git
-cd FreeCAD-ClaudeCode
-./install.sh                 # Linux/macOS
-install.bat                  # Windows
-```
-
-Options: `--mod-dir <path>` if auto-detection fails, `--copy` to force a
-copy instead of a symlink, `--uninstall` to remove the addon.
 
 ### Manual installation
 
@@ -224,7 +226,7 @@ explicitly includes:
 - the **full contents of any file or image you attach**.
 
 If your designs are proprietary or confidential, assume the agent may share
-the geometry it inspects with Anthropic. Do not use this addon on
+the geometry it inspects with the model provider (Anthropic or Z.AI). Do not use this addon on
 confidential work if that disclosure is unacceptable.
 
 ## Security notes
@@ -285,6 +287,14 @@ python3 -m pip install -r requirements-dev.txt
 python3 -m pytest -q tests
 ```
 
+On a minimal or headless Linux system (containers, CI runners), PySide6 also
+needs a few system libraries, otherwise importing it fails with
+`libEGL.so.1: cannot open shared object file`:
+
+```bash
+sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+```
+
 The suite uses real Qt widgets and processes in offscreen mode, with FreeCAD
 and agent services replaced by test doubles. It never sends prompts or reads
 your agent credentials. The optional transaction integration test uses the
@@ -293,7 +303,9 @@ it looks under `/usr/lib/freecad/lib` by default, or at `FREECAD_LIB_DIR`.
 It is skipped when that library directory is absent. A separate loopback
 transport integration test is skipped if the environment prohibits listening
 on local sockets. GitHub Actions runs the Qt/security regressions on Linux,
-Windows and macOS on pushes and pull requests.
+Windows and macOS on pushes and pull requests
+([`.github/workflows/tests.yml`](.github/workflows/tests.yml)); each OS
+reports its own status.
 
 ## License
 
