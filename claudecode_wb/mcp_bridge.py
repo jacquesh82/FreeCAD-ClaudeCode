@@ -14,19 +14,29 @@ import json
 import os
 import socket
 import sys
+import time
 
 RPC_HOST = "127.0.0.1"
-RPC_PORT = int(os.environ.get("FREECAD_RPC_PORT", "0"))
+try:
+    RPC_PORT = int(os.environ.get("FREECAD_RPC_PORT", "0"))
+except ValueError:
+    RPC_PORT = 0
 RPC_TOKEN = os.environ.get("FREECAD_RPC_TOKEN", "")
+MAX_MESSAGE_CHARS = 8 * 1024 * 1024
+MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
 TOOLS = [
     {
         "name": "exec_python",
         "description": (
-            "Runs arbitrary Python code inside the open FreeCAD session. "
+            "Runs Python code inside the open FreeCAD session. "
             "Available variables: App/FreeCAD, Gui/FreeCADGui. "
             "Use print() to return values. "
-            "Remember to call App.ActiveDocument.recompute() after modifications."
+            "Remember to call App.ActiveDocument.recompute() after modifications. "
+            "The complete code is shown to the user inside FreeCAD and runs only "
+            "once they approve it; this may take a while. If the user denies a "
+            "run, the call returns an error: do not resubmit the same code, "
+            "explain or propose a different approach instead."
         ),
         "inputSchema": {
             "type": "object",
@@ -61,17 +71,31 @@ TOOLS = [
 ]
 
 
+# exec_python waits for the user's approval in FreeCAD: allow a long review.
+EXEC_TIMEOUT = 3600.0
+
+
 def rpc_call(payload, timeout=180.0):
     """Send one JSON-line request to the FreeCAD RPC server, return the response."""
     with socket.create_connection((RPC_HOST, RPC_PORT), timeout=timeout) as sock:
+        deadline = time.monotonic() + timeout
         sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
         buf = b""
         while not buf.endswith(b"\n"):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("FreeCAD RPC response timed out")
+            sock.settimeout(remaining)
             chunk = sock.recv(65536)
             if not chunk:
                 break
             buf += chunk
-    return json.loads(buf.decode("utf-8"))
+            if len(buf) > MAX_RESPONSE_BYTES:
+                raise ValueError("FreeCAD RPC response too large")
+    response = json.loads(buf.decode("utf-8"))
+    if not isinstance(response, dict):
+        raise ValueError("FreeCAD RPC response must be an object")
+    return response
 
 
 def tool_result(text, is_error=False, extra_content=None):
@@ -82,6 +106,8 @@ def tool_result(text, is_error=False, extra_content=None):
 
 
 def handle_tool_call(name, args):
+    if not isinstance(args, dict):
+        return tool_result("Tool arguments must be an object", True)
     if RPC_PORT == 0 or not RPC_TOKEN:
         return tool_result(
             "FREECAD_RPC_PORT/FREECAD_RPC_TOKEN not set — is the FreeCAD "
@@ -90,7 +116,10 @@ def handle_tool_call(name, args):
         )
     try:
         if name == "exec_python":
-            resp = rpc_call({"op": "exec", "token": RPC_TOKEN, "code": args.get("code", "")})
+            resp = rpc_call(
+                {"op": "exec", "token": RPC_TOKEN, "code": args.get("code", "")},
+                timeout=EXEC_TIMEOUT,
+            )
             if resp.get("ok"):
                 out = resp.get("stdout", "")
                 return tool_result("OK\n" + out if out else "OK (no output)")
@@ -138,50 +167,77 @@ def send(msg):
     sys.stdout.flush()
 
 
+def protocol_error(msg_id, code, message):
+    return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
+
+
+def handle_message(msg):
+    """Validate at the protocol boundary; malformed messages never kill stdio."""
+    if not isinstance(msg, dict):
+        return protocol_error(None, -32600, "Request must be an object")
+    msg_id = msg.get("id")
+    if msg_id is not None and type(msg_id) not in (str, int):
+        return protocol_error(None, -32600, "Invalid request id")
+    method = msg.get("method")
+    if msg.get("jsonrpc") != "2.0" or not isinstance(method, str):
+        return protocol_error(msg_id, -32600, "Invalid JSON-RPC request")
+    if "id" not in msg:
+        return None  # Notifications never produce a response.
+    params = msg.get("params", {})
+    if not isinstance(params, dict):
+        return protocol_error(msg_id, -32602, "params must be an object")
+    if method == "initialize":
+        requested = params.get("protocolVersion", "2024-11-05")
+        if not isinstance(requested, str):
+            return protocol_error(msg_id, -32602, "protocolVersion must be a string")
+        result = {
+            "protocolVersion": requested,
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "freecad", "version": "0.2.0"},
+        }
+    elif method == "tools/list":
+        result = {"tools": TOOLS}
+    elif method == "tools/call":
+        name = params.get("name")
+        arguments = params.get("arguments", {})
+        if not isinstance(name, str) or not isinstance(arguments, dict):
+            return protocol_error(msg_id, -32602, "Tool name must be a string and arguments an object")
+        if name == "exec_python" and not isinstance(arguments.get("code"), str):
+            return protocol_error(msg_id, -32602, "code must be a string")
+        if name == "screenshot" and any(
+            type(arguments.get(key, default)) is not int
+            for key, default in (("width", 1280), ("height", 800))
+        ):
+            return protocol_error(msg_id, -32602, "Screenshot dimensions must be integers")
+        result = handle_tool_call(name, arguments)
+    elif method == "ping":
+        result = {}
+    else:
+        return protocol_error(msg_id, -32601, "Unknown method: %s" % method)
+    return {"jsonrpc": "2.0", "id": msg_id, "result": result}
+
+
 def main():
-    for line in sys.stdin:
+    while True:
+        line = sys.stdin.readline(MAX_MESSAGE_CHARS + 1)
+        if not line:
+            return
+        if len(line) > MAX_MESSAGE_CHARS:
+            while line and not line.endswith("\n"):
+                line = sys.stdin.readline(MAX_MESSAGE_CHARS + 1)
+            send(protocol_error(None, -32600, "Request too large"))
+            continue
         line = line.strip()
         if not line:
             continue
         try:
             msg = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
+            send(protocol_error(None, -32700, "Invalid JSON"))
             continue
-        method = msg.get("method")
-        msg_id = msg.get("id")
-        if method == "initialize":
-            requested = msg.get("params", {}).get("protocolVersion", "2024-11-05")
-            send(
-                {
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "result": {
-                        "protocolVersion": requested,
-                        "capabilities": {"tools": {}},
-                        "serverInfo": {"name": "freecad", "version": "0.1.0"},
-                    },
-                }
-            )
-        elif method == "tools/list":
-            send({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": TOOLS}})
-        elif method == "tools/call":
-            params = msg.get("params", {})
-            result = handle_tool_call(
-                params.get("name", ""), params.get("arguments", {}) or {}
-            )
-            send({"jsonrpc": "2.0", "id": msg_id, "result": result})
-        elif method == "ping":
-            send({"jsonrpc": "2.0", "id": msg_id, "result": {}})
-        elif msg_id is not None:
-            # Unknown method but a request (not a notification): answer it.
-            send(
-                {
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "error": {"code": -32601, "message": "unknown method: %s" % method},
-                }
-            )
-        # Notifications (notifications/initialized, etc.) are ignored.
+        response = handle_message(msg)
+        if response is not None:
+            send(response)
 
 
 if __name__ == "__main__":
