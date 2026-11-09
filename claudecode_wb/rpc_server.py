@@ -11,12 +11,17 @@ Security model (FreeCAD Addon Index rules for AI agents):
   * model-generated code is shown to the user in FreeCAD and runs only once
     approved, unless the user opted in to automatic execution in the panel;
   * each approved run is wrapped in one undo transaction;
+  * the agent's other tools (shell, files, web…) reach FreeCAD through the
+    CLI's permission-prompt tool: every call is shown with its complete input
+    and allowed only once approved; there is no automatic mode for them;
   * screenshots are written to a per-user private directory.
 
 Protocol: one JSON request per line, one JSON response per line.
   {"op": "exec", "token": "...", "code": "..."}            -> {"ok": true, "stdout": "..."}
   {"op": "scene", "token": "..."}                          -> {"ok": true, "scene": "..."}
   {"op": "screenshot", "token": "...", "width": 1280, ...} -> {"ok": true, "path": "..."}
+  {"op": "permission", "token": "...", "tool_name": "Bash", "input": {...}}
+                                                           -> {"ok": true, "allow": false}
 """
 
 import contextlib
@@ -58,7 +63,8 @@ class FreeCADRpcServer:
         # Opt-in set by the panel; off by default per the Index rules.
         self.auto_approve = False
         self.agent_name = "The agent"
-        # Optional callable(approved: bool, code: str) notified of decisions.
+        # Optional callable(kind: "exec"|"tool", approved: bool, detail: str)
+        # notified of every decision (shown in the chat history).
         self.decision_callback = None
         self._server.newConnection.connect(self._on_new_connection)
         if not self._server.listen(QtNetwork.QHostAddress.LocalHost, 0):
@@ -99,7 +105,7 @@ class FreeCADRpcServer:
         self._active = False
         self.auto_approve = False
         if self._approval_open:
-            approval.cancel_exec_approval()
+            approval.cancel_pending_approval()
         for sock in list(self._buffers):
             self._drop(sock, "turn ended")
 
@@ -216,6 +222,10 @@ class FreeCADRpcServer:
         if op == "screenshot":
             return all(type(request.get(key, default)) is int
                        for key, default in (("width", 1280), ("height", 800)))
+        if op == "permission":
+            return isinstance(request.get("tool_name"), str) and isinstance(
+                request.get("input"), dict
+            )
         return False
 
     # --- opérations -------------------------------------------------------
@@ -230,6 +240,8 @@ class FreeCADRpcServer:
             return self._op_screenshot(
                 int(request.get("width", 1280)), int(request.get("height", 800))
             )
+        if op == "permission":
+            return self._op_permission(request["tool_name"], request["input"])
         return {"ok": False, "error": "unknown op: %r" % op}
 
     def _op_exec(self, code):
@@ -253,14 +265,14 @@ class FreeCADRpcServer:
                 approved = approval.request_exec_approval(code, self.agent_name)
             finally:
                 self._approval_open = False
-            self._notify(approved, code)
+            self._notify("exec", approved, code)
             if not approved:
                 App.Console.PrintMessage(
                     "[Claude Code Connector] user denied a code run\n"
                 )
                 return {"ok": False, "denied": True, "error": DENIED_MESSAGE}
         else:
-            self._notify(True, code)
+            self._notify("exec", True, code)
 
         if not self._active or lease != self._token:
             return {"ok": False, "error": "The agent turn ended before execution."}
@@ -280,10 +292,33 @@ class FreeCADRpcServer:
             self._commit_transaction(transaction)
         return {"ok": True, "stdout": out.getvalue()}
 
-    def _notify(self, approved, code):
+    def _op_permission(self, tool_name, tool_input):
+        """Ask the user about one call of the agent's own tools. Never
+        automatic: the exec auto-run opt-in does not apply here."""
+        if not self._active:
+            return {"ok": False, "error": "The agent turn has ended."}
+        if self._approval_open:
+            return {
+                "ok": True,
+                "allow": False,
+                "message": "Another request is waiting for the user's "
+                "approval; retry this tool call once it has been answered.",
+            }
+        lease = self._token
+        self._approval_open = True
+        try:
+            allowed = approval.request_tool_approval(tool_name, tool_input, self.agent_name)
+        finally:
+            self._approval_open = False
+        if not self._active or lease != self._token:
+            allowed = False
+        self._notify("tool", allowed, tool_name)
+        return {"ok": True, "allow": allowed}
+
+    def _notify(self, kind, approved, detail):
         if self.decision_callback is not None:
             try:
-                self.decision_callback(approved, code)
+                self.decision_callback(kind, approved, detail)
             except Exception:  # noqa: BLE001 — UI feedback must not break exec
                 pass
 

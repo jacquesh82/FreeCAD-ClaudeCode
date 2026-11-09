@@ -8,10 +8,11 @@ Architecture:
   paths.py         per-user private directory for every file written for the agent
   runner_base.py   QProcess lifecycle shared by the agent runners
   claude_runner.py `claude -p --output-format stream-json` runner
-  zcode_runner.py  ZCode CLI runner
+  permission_hook.py PreToolUse hook sending every other agent tool call to
+                   FreeCAD for approval (when the user enables those tools)
   rpc_server.py    local TCP server INSIDE FreeCAD (GUI thread) executing Python
                    after user approval; revocable per-turn token on every request
   process_host.py  stdlib launcher owning each turn's process group / Windows job
   mcp_bridge.py    standalone stdio MCP server launched by the CLI; forwards
-                   tool calls to rpc_server over TCP
+                   tool calls and permission prompts to rpc_server over TCP
 """

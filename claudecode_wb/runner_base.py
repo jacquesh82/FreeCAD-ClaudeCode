@@ -1,17 +1,17 @@
-"""Common machinery for agent CLI runners (Claude Code, ZCode…).
+"""Common machinery for agent CLI runners (currently Claude Code).
 
 One conversation turn = one headless CLI process; continuity is provided by
-each agent's resume flag. Subclasses live in claude_runner.py / zcode_runner.py
-and only provide binary detection, argument building and event parsing; the
-QProcess lifecycle and the incremental JSON stream parsing live here.
+the agent's resume flag. Subclasses (claude_runner.py) only provide binary
+detection, argument building and event parsing; the QProcess lifecycle and
+the incremental JSON stream parsing live here.
 
 Every file written for the agent (working directory, MCP configuration
 carrying the RPC token, attachments) lives in a per-user private directory
 (see paths.py), never in a shared temporary directory.
 
-The stdout parsers must tolerate both newline-delimited JSON (Claude Code) and
-space-delimited JSON (ZCode writes JSON.stringify(e) + " "), so events are
-extracted with raw_decode() instead of line splitting.
+The stdout parser tolerates any whitespace between JSON events and non-JSON
+noise (CLI banners), so events are extracted with raw_decode() instead of
+line splitting.
 """
 
 import codecs
@@ -97,7 +97,6 @@ class AgentRunner(QtCore.QObject):
         self._process_pid = 0
         self._rpc_revoker = None
         self._stopping = False
-        self.unrestricted = False
         self._workdir = paths.new_private_dir(self.workdir_name + "-")
         app = QtCore.QCoreApplication.instance()
         if app is not None:
@@ -234,7 +233,6 @@ class AgentRunner(QtCore.QObject):
             return
         self._revoke_rpc()
         self._turn_active = False
-        self.unrestricted = False
         if self._reset_after_turn:
             self.session_id = ""
             self._reset_after_turn = False

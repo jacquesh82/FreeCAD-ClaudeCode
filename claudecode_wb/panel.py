@@ -5,8 +5,10 @@ rpc_server.py / approval.py:
   * no agent is selected by default; nothing starts until the user picks one;
   * consent to send data is asked before the first prompt to each service;
   * the RPC server starts at the first prompt, not when FreeCAD starts;
-  * dangerous modes (auto-run of generated code, all CLI tools) are opt-in,
-    off by default, confirmed by a dialog and shown as a visible warning.
+  * automatic execution of generated code is opt-in, off by default,
+    confirmed by a dialog and shown as a visible warning;
+  * the agent's other tools (shell, files, web…) are off by default; when
+    enabled, every call is shown in FreeCAD and runs only once approved.
 """
 
 import html
@@ -16,36 +18,23 @@ import FreeCADGui as Gui
 
 from PySide import QtCore, QtGui, QtWidgets
 
-from . import approval, claude_runner, rpc_server, zcode_runner
+from . import approval, claude_runner, rpc_server
 
 _dock = None
 
 AGENT_PLACEHOLDER = "— choose an agent —"
 
 # UI-facing description of each supported agent CLI. `models` feeds the model
-# combo; ZCode has no --model flag (0.16.x) so it only offers "default".
+# combo. The user must still pick the agent: no service is selected by default.
 AGENTS = [
     {
         "name": "Claude Code",
         "factory": claude_runner.ClaudeRunner,
         "models": ["default", "sonnet", "opus", "haiku"],
-        "fixed_permissions": False,
         "provider": "Anthropic",
         "cli": "claude",
         "login_note": "It uses the Claude Code login already present on this "
                       "machine (your Anthropic subscription).",
-    },
-    {
-        "name": "ZCode",
-        "factory": zcode_runner.ZCodeRunner,
-        "models": ["default"],
-        "fixed_permissions": True,  # headless prompts always run in yolo mode
-        "provider": "Z.AI",
-        "cli": "zcode",
-        "login_note": "It uses the Z.AI login of ZCode Desktop: the addon copies "
-                      "the model provider selected in ZCode Desktop (including "
-                      "its API key) into ~/.zcode/cli/config.json so the CLI "
-                      "can run headless.",
     },
 ]
 
@@ -55,13 +44,6 @@ AUTO_RUN_WARNING = (
     "shown to you first.\n\nFiles you open may contain instructions planted "
     "by someone else that the agent will follow. Reviewing each run is your "
     "main protection.\n\nEnable automatic execution anyway?"
-)
-
-SKIP_PERMS_WARNING = (
-    "With this option the agent's own tools (reading and writing any file, "
-    "running shell commands, network access…) run without asking you, with "
-    "your full user permissions. For Claude Code this is "
-    "--dangerously-skip-permissions.\n\nThis is not a sandbox. Enable it anyway?"
 )
 
 
@@ -181,18 +163,18 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
         self.auto_run.clicked.connect(self._on_auto_run_clicked)
         layout.addWidget(self.auto_run)
 
-        self.skip_perms = QtWidgets.QCheckBox(
-            "Allow all agent tools (files, shell…) without approval (dangerous)"
+        self.other_tools = QtWidgets.QCheckBox(
+            "Let the agent use its other tools (shell, files, web…) — "
+            "each call is shown here for approval"
         )
-        self._skip_perms_tooltip = (
-            "By default only the FreeCAD tools (exec_python, get_scene, "
-            "screenshot) and reading your attachments are allowed to Claude "
-            "Code. This checkbox enables --dangerously-skip-permissions, which "
-            "also grants unrestricted file and shell access."
+        self.other_tools.setToolTip(
+            "By default the agent only has the FreeCAD tools (exec_python, "
+            "get_scene, screenshot) and can read your attachments. With this "
+            "option it can also ask to run shell commands, read or write "
+            "files and access the web; every such call is displayed in "
+            "FreeCAD with its complete input and runs only once you allow it."
         )
-        self.skip_perms.setToolTip(self._skip_perms_tooltip)
-        self.skip_perms.clicked.connect(self._on_skip_perms_clicked)
-        layout.addWidget(self.skip_perms)
+        layout.addWidget(self.other_tools)
 
         self.warning = QtWidgets.QLabel()
         self.warning.setWordWrap(True)
@@ -301,7 +283,7 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
         selected agent. Dangerous modes are reset to off on every switch."""
         agent = self._agent
         self.model_combo.clear()
-        for box in (self.auto_run, self.skip_perms):
+        for box in (self.auto_run, self.other_tools):
             box.blockSignals(True)
             box.setChecked(False)
             box.blockSignals(False)
@@ -309,7 +291,7 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
             rpc_server.get_server().auto_approve = False
         self.stop_btn.setEnabled(False)
         enabled = agent is not None
-        for widget in (self.send_btn, self.model_combo, self.auto_run, self.skip_perms):
+        for widget in (self.send_btn, self.model_combo, self.auto_run, self.other_tools):
             widget.setEnabled(enabled)
         if agent is None:
             self.disclosure.setText(
@@ -320,32 +302,21 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
             return
 
         self.model_combo.addItems(agent["models"])
-        if agent["fixed_permissions"]:
-            self.model_combo.setToolTip(
-                "The ZCode CLI (0.16.x) has no --model flag; the account's "
-                "default model is used."
-            )
-            self.skip_perms.setToolTip(
-                "ZCode headless prompts always run with all tools allowed "
-                "(--mode yolo); the CLI offers no per-tool allowlist. You must "
-                "opt in here before prompts can be sent to ZCode."
-            )
-        else:
-            self.model_combo.setToolTip("Claude model to use")
-            self.skip_perms.setToolTip(self._skip_perms_tooltip)
+        self.model_combo.setToolTip("Claude model to use")
         self.disclosure.setText(
             "⚠ Each prompt may upload your design data to %s: scene contents "
             "(object names, file paths), 3D-view screenshots, the agent's code "
-            "and its output, and any attachments. The agent runs Python inside "
-            "FreeCAD with your user permissions; every run is shown to you for "
-            "approval first unless you opt in to automatic execution above."
+            "and its output, any attachments, and the results of the other "
+            "tool calls you approve. The agent runs Python inside FreeCAD with "
+            "your user permissions; every run is shown to you for approval "
+            "first unless you opt in to automatic execution above."
             % agent["provider"]
         )
         self._refresh_warning()
 
     def _welcome_html(self):
         return (
-            "<i>Choose an agent (Claude Code or ZCode) in the combo above. "
+            "<i>Choose an agent (Claude Code) in the combo above. "
             "Before your first prompt to a service you will be asked to "
             "consent to the data it receives. The agent gets the FreeCAD "
             "tools exec_python, get_scene and screenshot; every exec_python "
@@ -364,29 +335,11 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
             rpc_server.get_server().auto_approve = self.auto_run.isChecked()
         self._refresh_warning()
 
-    def _on_skip_perms_clicked(self, checked):
-        if checked and not approval.confirm_dangerous_option(
-            "All agent tools without approval", SKIP_PERMS_WARNING, self
-        ):
-            self.skip_perms.setChecked(False)
-        runner = self.runners.get(self._agent_name)
-        if (not self.skip_perms.isChecked() and runner is not None
-                and runner.running and runner.unrestricted):
-            runner.stop()
-            self.status.setText("Stopping agent — unrestricted permissions revoked")
-        self._refresh_warning()
-
     def _refresh_warning(self):
         active = []
         if self.auto_run.isChecked():
             active.append(
                 "the agent's Python code runs in FreeCAD WITHOUT being shown to you"
-            )
-        if self.skip_perms.isChecked() or any(
-            runner.running and runner.unrestricted for runner in self.runners.values()
-        ):
-            active.append(
-                "the agent's file, shell and network tools run WITHOUT approval"
             )
         if not active:
             self.warning.hide()
@@ -516,13 +469,6 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
         prompt = self.prompt_edit.toPlainText().strip()
         if (not prompt and not self._attachments) or self.runner.running:
             return
-        if agent["fixed_permissions"] and not self.skip_perms.isChecked():
-            self._append_html(
-                "<p style='color:#bb2222;'>ZCode's headless mode runs all of "
-                "its tools (files, shell…) without asking. Tick “Allow all "
-                "agent tools” above to use it, or choose Claude Code.</p>"
-            )
-            return
         # Consent to send data to this service (asked once per service).
         if not approval.ensure_consent(agent, parent=self):
             self.status.setText("Cancelled — no data was sent")
@@ -571,7 +517,7 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
             accepted = runner.send_prompt(
                 prompt,
                 model="" if model == "default" else model,
-                skip_permissions=self.skip_perms.isChecked(),
+                extended_tools=self.other_tools.isChecked(),
                 attachments=attachments,
             )
         except Exception as exc:
@@ -605,7 +551,20 @@ class ClaudeCodePanel(QtWidgets.QDockWidget):
 
     # --- runner / server signals -------------------------------------------
 
-    def _on_exec_decision(self, approved, code):
+    def _on_exec_decision(self, kind, approved, detail):
+        if kind == "tool":
+            if approved:
+                self._append_html(
+                    "<p style='color:#2a7a2a;'>&#10004; Tool <code>%s</code> "
+                    "allowed.</p>" % html.escape(detail)
+                )
+            else:
+                self._append_html(
+                    "<p style='color:#bb2222;'>&#10008; Tool <code>%s</code> "
+                    "denied — not run.</p>" % html.escape(detail)
+                )
+            return
+        code = detail
         if self.auto_run.isChecked():
             self._append_html(
                 "<p style='color:#a30000;'>&#9889; Code run automatically "

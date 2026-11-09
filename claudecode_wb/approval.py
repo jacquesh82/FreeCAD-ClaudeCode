@@ -4,6 +4,9 @@ Index rules for AI agents.
 * ``request_exec_approval`` shows the complete model-generated code inside
   FreeCAD and runs it only once the user approves (the panel can opt in to
   automatic execution, which bypasses this dialog).
+* ``request_tool_approval`` shows the complete input of any other agent tool
+  call (shell command, file write, file read outside the attachments…) and
+  allows it only once the user approves. There is no automatic mode.
 * ``ensure_consent`` asks, once per remote AI service, for consent to send
   the listed kinds of data. The answer is recorded in FreeCAD's parameters
   and asked again when the list of data kinds changes.
@@ -11,6 +14,7 @@ Index rules for AI agents.
 
 import hashlib
 import html
+import json
 import re
 
 import FreeCAD as App
@@ -31,11 +35,13 @@ DATA_KINDS = (
     "screenshots of the active 3D view, uploaded as PNG images "
     "(screenshot tool)",
     "the full contents of any files or images you attach to a prompt",
+    "if you enable the agent's other tools: the output of each shell "
+    "command, file read or web request you approve",
 )
 
 _MONO = QtGui.QFont("monospace")
 _MONO.setStyleHint(QtGui.QFont.TypeWriter)
-_active_exec_dialog = None
+_active_dialog = None
 
 
 def params():
@@ -52,23 +58,17 @@ def _main_window():
 # --- code approval ----------------------------------------------------------
 
 
-class ExecApprovalDialog(QtWidgets.QDialog):
-    """Shows the complete code the agent wants to run; Run or Deny."""
+class ApprovalDialog(QtWidgets.QDialog):
+    """Shows exactly what the agent wants to run; Run (Allow) or Deny."""
 
-    def __init__(self, code, agent_name, parent=None):
+    def __init__(self, title, intro_html, text, run_label, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Approve code execution — Claude Code Connector")
+        self.setWindowTitle("%s — Claude Code Connector" % title)
         self.setModal(True)
         self.resize(760, 520)
 
         layout = QtWidgets.QVBoxLayout(self)
-        intro = QtWidgets.QLabel(
-            "<b>%s wants to run the Python code below inside FreeCAD, with "
-            "your full user permissions.</b><br>Documents and other files the "
-            "agent reads may contain instructions planted by someone else; "
-            "reviewing this code is your main protection. Run it only if you "
-            "understand what it does." % html.escape(agent_name)
-        )
+        intro = QtWidgets.QLabel(intro_html)
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
@@ -76,13 +76,13 @@ class ExecApprovalDialog(QtWidgets.QDialog):
         self.code_view.setReadOnly(True)
         self.code_view.setFont(_MONO)
         self.code_view.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
-        self.code_view.setPlainText(code)
+        self.code_view.setPlainText(text)
         layout.addWidget(self.code_view, stretch=1)
 
         buttons = QtWidgets.QDialogButtonBox()
-        self.run_btn = buttons.addButton("Run this code", QtWidgets.QDialogButtonBox.AcceptRole)
+        self.run_btn = buttons.addButton(run_label, QtWidgets.QDialogButtonBox.AcceptRole)
         self.deny_btn = buttons.addButton("Deny", QtWidgets.QDialogButtonBox.RejectRole)
-        # Deny is the default so that a stray Enter never runs code.
+        # Deny is the default so that a stray Enter never runs anything.
         self.run_btn.setAutoDefault(False)
         self.run_btn.setDefault(False)
         self.deny_btn.setAutoDefault(True)
@@ -92,21 +92,73 @@ class ExecApprovalDialog(QtWidgets.QDialog):
         layout.addWidget(buttons)
 
 
-def request_exec_approval(code, agent_name="The agent"):
-    """Block until the user approves or denies the code. Returns True to run."""
-    global _active_exec_dialog
-    dialog = ExecApprovalDialog(code, agent_name, parent=_main_window())
-    _active_exec_dialog = dialog
+def exec_approval_dialog(code, agent_name, parent=None):
+    return ApprovalDialog(
+        "Approve code execution",
+        "<b>%s wants to run the Python code below inside FreeCAD, with your "
+        "full user permissions.</b><br>Documents and other files the agent "
+        "reads may contain instructions planted by someone else; reviewing "
+        "this code is your main protection. Run it only if you understand "
+        "what it does." % html.escape(agent_name),
+        code,
+        "Run this code",
+        parent,
+    )
+
+
+def format_tool_input(tool_input):
+    """Render a tool input completely and readably: every field is shown,
+    string values verbatim (commands, file contents), others as JSON."""
+    parts = []
+    for key, value in tool_input.items():
+        if isinstance(value, str):
+            text = value
+        else:
+            text = json.dumps(value, indent=2, ensure_ascii=False)
+        parts.append("── %s ──\n%s" % (key, text))
+    return "\n\n".join(parts) if parts else "(no input)"
+
+
+def tool_approval_dialog(tool_name, tool_input, agent_name, parent=None):
+    return ApprovalDialog(
+        "Approve agent tool",
+        "<b>%s wants to use its <code>%s</code> tool with the input below, "
+        "with your full user permissions.</b><br>This may run a shell "
+        "command, read or modify files, or access the network; its result is "
+        "sent to the AI service. Files the agent reads may contain "
+        "instructions planted by someone else; allow it only if you "
+        "understand what it does." % (html.escape(agent_name), html.escape(tool_name)),
+        format_tool_input(tool_input),
+        "Allow",
+        parent,
+    )
+
+
+def _run_dialog(dialog):
+    global _active_dialog
+    _active_dialog = dialog
     try:
         return dialog.exec_() == QtWidgets.QDialog.Accepted
     finally:
-        _active_exec_dialog = None
+        _active_dialog = None
 
 
-def cancel_exec_approval():
+def request_exec_approval(code, agent_name="The agent"):
+    """Block until the user approves or denies the code. Returns True to run."""
+    return _run_dialog(exec_approval_dialog(code, agent_name, parent=_main_window()))
+
+
+def request_tool_approval(tool_name, tool_input, agent_name="The agent"):
+    """Block until the user allows or denies the tool call. True to allow."""
+    return _run_dialog(
+        tool_approval_dialog(tool_name, tool_input, agent_name, parent=_main_window())
+    )
+
+
+def cancel_pending_approval():
     """Reject a pending review when the requesting turn loses RPC access."""
-    if _active_exec_dialog is not None:
-        _active_exec_dialog.reject()
+    if _active_dialog is not None:
+        _active_dialog.reject()
 
 
 # --- consent to send data ---------------------------------------------------

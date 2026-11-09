@@ -22,6 +22,10 @@ try:
 except ValueError:
     RPC_PORT = 0
 RPC_TOKEN = os.environ.get("FREECAD_RPC_TOKEN", "")
+# Set by the runner when the agent's other tools are enabled: the CLI then
+# routes every permission request to approve_tool (--permission-prompt-tool).
+PERMISSION_TOOL_ENABLED = os.environ.get("FREECAD_PERMISSION_TOOL") == "1"
+PERMISSION_TOOL = "approve_tool"
 MAX_MESSAGE_CHARS = 8 * 1024 * 1024
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
@@ -69,6 +73,28 @@ TOOLS = [
         },
     },
 ]
+
+PERMISSION_TOOL_SPEC = {
+    "name": PERMISSION_TOOL,
+    "description": (
+        "Internal: called by the Claude Code CLI to ask the user, inside "
+        "FreeCAD, for permission to run one of the agent's tools. Never call "
+        "it yourself."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "tool_name": {"type": "string"},
+            "input": {"type": "object"},
+            "tool_use_id": {"type": "string"},
+        },
+        "required": ["tool_name", "input"],
+    },
+}
+
+
+def listed_tools():
+    return TOOLS + [PERMISSION_TOOL_SPEC] if PERMISSION_TOOL_ENABLED else TOOLS
 
 
 # exec_python waits for the user's approval in FreeCAD: allow a long review.
@@ -127,6 +153,8 @@ def handle_tool_call(name, args):
                 (resp.get("stdout", "") + "\n" + resp.get("error", "unknown error")).strip(),
                 True,
             )
+        if name == PERMISSION_TOOL and PERMISSION_TOOL_ENABLED:
+            return permission_decision(args)
         if name == "get_scene":
             resp = rpc_call({"op": "scene", "token": RPC_TOKEN})
             if resp.get("ok"):
@@ -162,6 +190,27 @@ def handle_tool_call(name, args):
         return tool_result("MCP bridge error: %r" % exc, True)
 
 
+def permission_decision(args):
+    """Answer the CLI's permission prompt with the user's decision in
+    FreeCAD. Only the input shown to the user can run: it is returned
+    verbatim as updatedInput. Any failure denies."""
+    tool_name, tool_input = args.get("tool_name"), args.get("input")
+    decision = {"behavior": "deny", "message": "The user denied this tool call in FreeCAD."}
+    try:
+        resp = rpc_call(
+            {"op": "permission", "token": RPC_TOKEN, "tool_name": tool_name,
+             "input": tool_input},
+            timeout=EXEC_TIMEOUT,
+        )
+        if resp.get("ok") and resp.get("allow") is True:
+            decision = {"behavior": "allow", "updatedInput": tool_input}
+        elif resp.get("message") or resp.get("error"):
+            decision["message"] = resp.get("message") or resp.get("error")
+    except Exception as exc:  # noqa: BLE001 — never allow on failure
+        decision["message"] = "FreeCAD approval unavailable (%r); denied." % exc
+    return tool_result(json.dumps(decision))
+
+
 def send(msg):
     sys.stdout.write(json.dumps(msg) + "\n")
     sys.stdout.flush()
@@ -193,10 +242,10 @@ def handle_message(msg):
         result = {
             "protocolVersion": requested,
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "freecad", "version": "0.2.0"},
+            "serverInfo": {"name": "freecad", "version": "0.3.0"},
         }
     elif method == "tools/list":
-        result = {"tools": TOOLS}
+        result = {"tools": listed_tools()}
     elif method == "tools/call":
         name = params.get("name")
         arguments = params.get("arguments", {})
@@ -204,6 +253,11 @@ def handle_message(msg):
             return protocol_error(msg_id, -32602, "Tool name must be a string and arguments an object")
         if name == "exec_python" and not isinstance(arguments.get("code"), str):
             return protocol_error(msg_id, -32602, "code must be a string")
+        if name == PERMISSION_TOOL and not (
+            isinstance(arguments.get("tool_name"), str)
+            and isinstance(arguments.get("input"), dict)
+        ):
+            return protocol_error(msg_id, -32602, "tool_name must be a string and input an object")
         if name == "screenshot" and any(
             type(arguments.get(key, default)) is not int
             for key, default in (("width", 1280), ("height", 800))

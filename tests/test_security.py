@@ -12,7 +12,7 @@ from unittest.mock import Mock
 import pytest
 from PySide import QtCore, QtNetwork
 
-from claudecode_wb import approval, claude_runner, paths, rpc_server, runner_base, zcode_runner
+from claudecode_wb import approval, claude_runner, mcp_bridge, paths, rpc_server, runner_base
 
 REAL_LISTEN = QtNetwork.QTcpServer.listen
 REAL_SERVER_PORT = QtNetwork.QTcpServer.serverPort
@@ -38,53 +38,8 @@ def server(qapp, monkeypatch):
     rpc.close()
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="ZCode discovery is Linux-only")
-def test_zcode_does_not_scan_shared_tmp_mounts(monkeypatch):
-    monkeypatch.delenv("ZCODE_APPIMAGE", raising=False)
-    monkeypatch.setattr(zcode_runner, "_candidate_appimages", lambda: [])
-    scan = Mock(side_effect=AssertionError("No automatic /tmp scan is permitted"))
-    monkeypatch.setattr(zcode_runner, "_sorted_existing", scan)
-    assert zcode_runner.find_zcode() is None
-    scan.assert_not_called()
-
-
-@pytest.mark.skipif(os.name != "posix", reason="POSIX ownership checks")
-def test_explicit_zcode_rejects_writable_ancestors_and_binaries(tmp_path, monkeypatch):
-    mount = tmp_path / "selected"
-    (mount / "resources/glm").mkdir(parents=True)
-    script = mount / "resources/glm/zcode.cjs"
-    script.write_text("// fake test bundle")
-    binary = mount / "zcode"
-    binary.write_text("#!/bin/sh\nexit 0\n")
-    binary.chmod(0o700)
-    assert zcode_runner._resolve_explicit(str(mount)) == (str(binary), str(script))
-    binary.chmod(0o777)
-    assert zcode_runner._resolve_explicit(str(mount)) is None
-    binary.chmod(0o700)
-    mount.chmod(0o777)
-    assert zcode_runner._resolve_explicit(str(mount)) is None
-
-
-@pytest.mark.skipif(os.name != "posix", reason="POSIX ownership checks")
-def test_executable_owned_by_another_user_is_rejected(tmp_path, monkeypatch):
-    binary = tmp_path / "other-owner"
-    binary.write_text("test")
-    original = os.lstat
-
-    def foreign_owner(path):
-        result = original(path)
-        if os.fspath(path) == str(binary):
-            fields = list(result)
-            fields[4] = os.getuid() + 100  # st_uid
-            return os.stat_result(fields)
-        return result
-
-    monkeypatch.setattr(paths.os, "lstat", foreign_owner)
-    assert not paths.trusted_path(binary)
-
-
-@pytest.mark.parametrize("attached,unrestricted", [(False, False), (True, False), (False, True)])
-def test_claude_tool_configuration_is_explicit(qapp, monkeypatch, attached, unrestricted):
+@pytest.mark.parametrize("attached,extended", [(False, False), (True, False), (False, True), (True, True)])
+def test_claude_tool_configuration_is_explicit(qapp, monkeypatch, attached, extended):
     runner = claude_runner.ClaudeRunner(1234, "TEST_TOKEN")
     monkeypatch.setattr(claude_runner, "find_claude", lambda: "fake-claude")
     launched = []
@@ -98,17 +53,90 @@ def test_claude_tool_configuration_is_explicit(qapp, monkeypatch, attached, unre
     monkeypatch.setattr(runner, "_start_process", start)
     attachments = [runner.stage_attachment("part.txt", data=b"fake attachment")] if attached else []
     try:
-        assert runner.send_prompt("test", skip_permissions=unrestricted, attachments=attachments)
+        assert runner.send_prompt("test", extended_tools=extended, attachments=attachments)
         assert "--strict-mcp-config" in launched
         assert "--setting-sources=" in launched
+        # The addon never configures the CLI to approve tools automatically.
+        assert not any("dangerously" in arg or arg in ("bypassPermissions", "acceptEdits")
+                       for arg in launched)
+        assert launched[launched.index("--permission-mode") + 1] == "default"
         tools = launched[launched.index("--tools") + 1]
-        assert tools == ("default" if unrestricted else "Read" if attached else "")
-        assert ("--dangerously-skip-permissions" in launched) == unrestricted
-        if not unrestricted:
-            assert launched[launched.index("--permission-mode") + 1] == "default"
+        assert tools == ("default" if extended else "Read" if attached else "")
+        allowed = launched[launched.index("--allowedTools") + 1].split(",")
+        assert all(tool.startswith(("mcp__freecad__", "Read(")) for tool in allowed)
+        assert ("Read(./attachments/**)" in allowed) == attached
+        config = json.loads(Path(runner._mcp_config_path).read_text())
+        env = config["mcpServers"]["freecad"]["env"]
+        assert env["FREECAD_PERMISSION_TOOL"] == ("1" if extended else "0")
+        if extended:
+            assert launched[launched.index("--permission-prompt-tool") + 1] == "mcp__freecad__approve_tool"
+            settings_path = launched[launched.index("--settings") + 1]
+            settings = json.loads(Path(settings_path).read_text())
+            assert set(settings) == {"hooks"}
+            hook = settings["hooks"]["PreToolUse"][0]
+            assert hook["matcher"] == "*"
+            assert "permission_hook.py" in hook["hooks"][0]["command"]
+            assert stat.S_IMODE(os.stat(settings_path).st_mode) & 0o077 == 0
+        else:
+            assert "--permission-prompt-tool" not in launched
+            assert "--settings" not in launched
     finally:
         runner._complete_turn(False)
         runner.close()
+
+
+@pytest.mark.parametrize("event,expected", [
+    ({"tool_name": "Bash", "tool_input": {"command": "echo hi"}}, "ask"),
+    ({"tool_name": "Read", "tool_input": {"file_path": "/etc/hostname"}}, "ask"),
+    ({"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, "ask"),
+    ({"tool_name": "WebFetch", "tool_input": {"url": "https://example.com"}}, "ask"),
+    ({"tool_name": "mcp__freecad__exec_python", "tool_input": {"code": "1"}}, None),
+    ({"tool_name": "TodoWrite", "tool_input": {"todos": []}}, None),
+    ({"tool_name": "ToolSearch", "tool_input": {"query": "select:x"}}, None),
+    ({"tool_name": 3}, "ask"),
+    (["not", "an", "object"], "ask"),
+    (None, "ask"),
+])
+def test_permission_hook_asks_for_every_side_effect(event, expected):
+    from claudecode_wb import permission_hook
+
+    assert permission_hook.decision(event) == expected
+
+
+def test_permission_hook_only_skips_reads_inside_attachments(tmp_path):
+    from claudecode_wb import permission_hook
+
+    attachments = tmp_path / "attachments"
+    attachments.mkdir()
+    (attachments / "part.step").write_text("data")
+    inside = {"tool_name": "Read", "tool_input": {"file_path": str(attachments / "part.step")}}
+    escape = {"tool_name": "Read", "tool_input": {"file_path": str(attachments / ".." / "secret")}}
+    sibling = {"tool_name": "Read", "tool_input": {"file_path": str(tmp_path / "attachments-x")}}
+    assert permission_hook.decision(inside, str(attachments)) is None
+    assert permission_hook.decision(escape, str(attachments)) == "ask"
+    assert permission_hook.decision(sibling, str(attachments)) == "ask"
+
+
+def test_permission_hook_script_prints_an_ask_decision():
+    hook = Path(__file__).resolve().parents[1] / "claudecode_wb/permission_hook.py"
+    result = subprocess.run(
+        [sys.executable, str(hook), ""],
+        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls"}}),
+        capture_output=True, text=True, timeout=30,
+    )
+    output = json.loads(result.stdout)["hookSpecificOutput"]
+    assert output["hookEventName"] == "PreToolUse"
+    assert output["permissionDecision"] == "ask"
+    silent = subprocess.run(
+        [sys.executable, str(hook), ""],
+        input=json.dumps({"tool_name": "mcp__freecad__get_scene", "tool_input": {}}),
+        capture_output=True, text=True, timeout=30,
+    )
+    assert silent.stdout.strip() == ""
+
+
+def test_hook_command_quotes_shell_metacharacters():
+    assert claude_runner._shell_quote('a b"$`\\c') == '"a b\\"\\$\\`\\\\c"'
 
 
 def test_windows_batch_shims_are_rejected_before_launch(qapp, monkeypatch):
@@ -239,30 +267,107 @@ def test_denied_code_never_opens_a_transaction(server, monkeypatch):
     App.setActiveTransaction.assert_not_called()
 
 
-def test_unchecking_unrestricted_tools_stops_turn_and_keeps_warning_until_finished(panel, monkeypatch):
-    runner = panel.runner
-    monkeypatch.setattr(claude_runner, "find_claude", lambda: "fake-claude")
+@pytest.mark.parametrize("allowed", [True, False])
+def test_tool_permission_shows_the_complete_input_and_reports_the_decision(server, monkeypatch, allowed):
+    seen, decisions = [], []
+    monkeypatch.setattr(
+        approval, "request_tool_approval",
+        lambda name, tool_input, agent: seen.append((name, tool_input)) or allowed,
+    )
+    server.decision_callback = lambda *args: decisions.append(args)
+    tool_input = {"command": "rm -rf build", "description": "clean"}
+    result = server._dispatch({"op": "permission", "tool_name": "Bash", "input": tool_input})
+    assert result == {"ok": True, "allow": allowed}
+    assert seen == [("Bash", tool_input)]
+    assert decisions == [("tool", allowed, "Bash")]
 
-    def start(*args, **kwargs):
-        runner._turn_active = True
-        runner._process = Mock()
-        runner._process.state.return_value = QtCore.QProcess.NotRunning
 
-    monkeypatch.setattr(runner, "_start_process", start)
-    panel.skip_perms.setChecked(True)
-    panel.prompt_edit.setPlainText("fake prompt")
-    panel._on_send()
-    server = rpc_server.get_server()
-    token = server.token
-    assert server._authorized({"token": token})
-    kills = []
-    monkeypatch.setattr(runner, "_kill_process_tree", lambda: kills.append(server._active))
-    panel.skip_perms.click()
-    assert kills == [False], "RPC must be revoked before killing processes"
-    assert not server._authorized({"token": token})
-    assert not panel.warning.isHidden()
-    runner._complete_turn(False)
-    assert panel.warning.isHidden()
+def test_tool_permission_ignores_the_exec_auto_run_opt_in(server, monkeypatch):
+    server.auto_approve = True
+    review = Mock(return_value=False)
+    monkeypatch.setattr(approval, "request_tool_approval", review)
+    result = server._dispatch({"op": "permission", "tool_name": "Write", "input": {"file_path": "x"}})
+    assert result["allow"] is False
+    review.assert_called_once()
+
+
+def test_tool_permission_is_denied_when_the_turn_ends_during_review(server, monkeypatch):
+    def review(*args):
+        server.end_turn(server.token)
+        return True
+
+    monkeypatch.setattr(approval, "request_tool_approval", review)
+    result = server._dispatch({"op": "permission", "tool_name": "Bash", "input": {"command": "ls"}})
+    assert result["allow"] is False
+
+
+def test_tool_permission_never_asks_twice_at_once(server, monkeypatch):
+    review = Mock(return_value=True)
+    monkeypatch.setattr(approval, "request_tool_approval", review)
+    server._approval_open = True
+    result = server._dispatch({"op": "permission", "tool_name": "Bash", "input": {"command": "ls"}})
+    assert result["allow"] is False
+    review.assert_not_called()
+
+
+@pytest.mark.parametrize("request_", [
+    {"op": "permission", "tool_name": "Bash"},
+    {"op": "permission", "tool_name": 1, "input": {}},
+    {"op": "permission", "tool_name": "Bash", "input": "rm -rf /"},
+])
+def test_malformed_permission_requests_are_rejected(request_):
+    assert not rpc_server.FreeCADRpcServer._valid_request(request_)
+
+
+def test_tool_approval_dialog_shows_every_field_verbatim(qapp):
+    content = "line 1\nline 2 with \"quotes\""
+    dialog = approval.tool_approval_dialog(
+        "Write", {"file_path": "/home/u/part.py", "content": content, "extra": [1, 2]}, "Claude Code"
+    )
+    shown = dialog.code_view.toPlainText()
+    assert "/home/u/part.py" in shown and content in shown and "1," in shown
+    assert dialog.deny_btn.isDefault() and not dialog.run_btn.isDefault()
+    dialog.deleteLater()
+
+
+@pytest.mark.parametrize("response,behavior", [
+    ({"ok": True, "allow": True}, "allow"),
+    ({"ok": True, "allow": False}, "deny"),
+    ({"ok": True, "allow": "yes"}, "deny"),
+    ({"ok": False, "error": "unauthorized"}, "deny"),
+])
+def test_bridge_permission_decision_runs_only_the_shown_input(monkeypatch, response, behavior):
+    sent = []
+    monkeypatch.setattr(mcp_bridge, "RPC_TOKEN", "TOKEN")
+    monkeypatch.setattr(mcp_bridge, "rpc_call", lambda payload, timeout: sent.append(payload) or response)
+    tool_input = {"command": "ls -la"}
+    result = mcp_bridge.permission_decision({"tool_name": "Bash", "input": tool_input})
+    decision = json.loads(result["content"][0]["text"])
+    assert decision["behavior"] == behavior
+    assert sent[0]["op"] == "permission" and sent[0]["input"] == tool_input
+    if behavior == "allow":
+        assert decision["updatedInput"] == tool_input
+    else:
+        assert "updatedInput" not in decision
+
+
+def test_bridge_permission_failure_denies(monkeypatch):
+    monkeypatch.setattr(mcp_bridge, "rpc_call", Mock(side_effect=ConnectionRefusedError()))
+    result = mcp_bridge.permission_decision({"tool_name": "Bash", "input": {"command": "ls"}})
+    assert json.loads(result["content"][0]["text"])["behavior"] == "deny"
+
+
+def test_bridge_lists_the_permission_tool_only_when_enabled(monkeypatch):
+    monkeypatch.setattr(mcp_bridge, "PERMISSION_TOOL_ENABLED", False)
+    names = [tool["name"] for tool in mcp_bridge.listed_tools()]
+    assert names == ["exec_python", "get_scene", "screenshot"]
+    monkeypatch.setattr(mcp_bridge, "PERMISSION_TOOL_ENABLED", True)
+    assert "approve_tool" in [tool["name"] for tool in mcp_bridge.listed_tools()]
+    monkeypatch.setattr(mcp_bridge, "PERMISSION_TOOL_ENABLED", False)
+    monkeypatch.setattr(mcp_bridge, "RPC_PORT", 1234)
+    monkeypatch.setattr(mcp_bridge, "RPC_TOKEN", "TOKEN")
+    result = mcp_bridge.handle_tool_call("approve_tool", {"tool_name": "Bash", "input": {}})
+    assert result["isError"]
 
 
 def test_runner_workspaces_configs_and_attachments_are_independent(qapp):
@@ -327,23 +432,6 @@ def test_private_writes_reject_symlink_destinations(tmp_path):
     with pytest.raises(OSError, match="symbolic link"):
         paths.write_private_file(link, "replacement")
     assert victim.read_text() == "sentinel"
-
-
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="ZCode configuration is Linux-only")
-def test_zcode_credentials_use_atomic_private_writer(tmp_path, monkeypatch):
-    desktop, settings, config = tmp_path / "desktop.json", tmp_path / "settings.json", tmp_path / "cli/config.json"
-    desktop.write_text(json.dumps({"provider": {"demo": {
-        "enabled": True, "options": {"apiKey": "FAKE_TEST_KEY"}, "models": {"demo-model": {}}
-    }}}))
-    settings.write_text("{}")
-    monkeypatch.setattr(zcode_runner, "_DESKTOP_CONFIG", str(desktop))
-    monkeypatch.setattr(zcode_runner, "_DESKTOP_SETTINGS", str(settings))
-    monkeypatch.setattr(zcode_runner, "_CLI_CONFIG", str(config))
-    assert zcode_runner._sync_cli_model_config() is None
-    assert json.loads(config.read_text())["provider"]["demo"]["options"]["apiKey"] == "FAKE_TEST_KEY"
-    if os.name == "posix":
-        assert stat.S_IMODE(config.stat().st_mode) == 0o600
-        assert stat.S_IMODE(config.parent.stat().st_mode) == 0o700
 
 
 def accept_socket(server, sock, monkeypatch):

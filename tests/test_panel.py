@@ -43,25 +43,50 @@ def test_preparation_errors_preserve_inputs(panel, monkeypatch, stage):
 
 
 def test_switching_agent_immediately_disables_rpc_auto_execution(panel):
+    from claudecode_wb.panel import AGENT_PLACEHOLDER
+
     server = rpc_server.get_server()
     server.auto_approve = True
     panel.auto_run.setChecked(True)
-    panel.agent_combo.setCurrentText("ZCode")
+    panel.other_tools.setChecked(True)
+    panel.agent_combo.setCurrentText(AGENT_PLACEHOLDER)
     assert not server.auto_approve
     assert not panel.auto_run.isChecked()
-    assert not panel.skip_perms.isChecked()
+    assert not panel.other_tools.isChecked()
 
 
-def test_previous_agents_completion_does_not_enable_send_during_current_turn(panel):
+def test_only_claude_code_is_offered_and_none_is_selected_by_default(qapp):
+    from claudecode_wb.panel import AGENT_PLACEHOLDER, ClaudeCodePanel
+
+    dock = ClaudeCodePanel()
+    try:
+        items = [dock.agent_combo.itemText(i) for i in range(dock.agent_combo.count())]
+        assert items == [AGENT_PLACEHOLDER, "Claude Code"]
+        assert dock.agent_combo.currentText() == AGENT_PLACEHOLDER
+        assert not dock.send_btn.isEnabled()
+        assert not dock.other_tools.isChecked()
+    finally:
+        dock.close()
+        dock.deleteLater()
+
+
+def test_stopped_agents_completion_does_not_enable_send_without_agent(panel):
+    from claudecode_wb.panel import AGENT_PLACEHOLDER
+
     old = panel.runner
-    panel.agent_combo.setCurrentText("ZCode")
-    panel.runner._turn_active = True
-    panel.send_btn.setEnabled(False)
-    panel.stop_btn.setEnabled(True)
+    old._turn_active = True
+    panel.agent_combo.setCurrentText(AGENT_PLACEHOLDER)
     old.turn_finished.emit(False, "old-session")
     assert not panel.send_btn.isEnabled()
-    assert panel.stop_btn.isEnabled()
-    panel.runner._complete_turn(False)
+    old._complete_turn(False)
+
+
+def test_tool_decisions_are_recorded_in_the_history(panel):
+    panel._on_exec_decision("tool", True, "Bash")
+    panel._on_exec_decision("tool", False, "Write")
+    text = panel.history.toPlainText()
+    assert "Tool Bash allowed" in text
+    assert "Tool Write denied" in text
 
 
 def test_consent_dialog_lists_attachments(qapp, monkeypatch):

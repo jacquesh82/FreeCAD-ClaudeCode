@@ -6,6 +6,13 @@ One conversation turn = one `claude -p` process; continuity is provided by
 (mcp_bridge.py). The MCP tools are pre-authorized at the CLI level because
 the approval step happens inside FreeCAD: rpc_server.py shows every
 exec_python run to the user before executing it.
+
+By default the CLI's own tools are removed (except Read, limited to the
+attachments). When the user enables the agent's other tools, they stay under
+the CLI's default permission mode and every call is approved inside FreeCAD:
+a PreToolUse hook (permission_hook.py) turns each call into a permission
+request, and --permission-prompt-tool routes it to the bridge's approve_tool.
+The addon never configures the CLI to approve tools automatically.
 """
 
 import json
@@ -28,6 +35,7 @@ __all__ = ["ClaudeRunner", "SYSTEM_PROMPT", "find_claude"]
 IS_WINDOWS = sys.platform == "win32"
 
 FREECAD_TOOLS = "mcp__freecad__exec_python,mcp__freecad__get_scene,mcp__freecad__screenshot"
+PERMISSION_PROMPT_TOOL = "mcp__freecad__approve_tool"
 
 # Give the user time to review code in the approval dialog before the CLI
 # gives up on the MCP tool call (milliseconds).
@@ -69,6 +77,13 @@ def _claude_launch_command(claude_path):
     return claude_path, []
 
 
+def _shell_quote(text):
+    """Double-quote one word for the POSIX shell that runs hook commands."""
+    for char in ("\\", '"', "$", "`"):
+        text = text.replace(char, "\\" + char)
+    return '"%s"' % text
+
+
 class ClaudeRunner(AgentRunner):
     """Un tour de conversation Claude Code dans un QProcess."""
 
@@ -78,8 +93,9 @@ class ClaudeRunner(AgentRunner):
     def __init__(self, rpc_port=0, rpc_token="", parent=None):
         super().__init__(rpc_port, rpc_token, parent=parent)
         self._mcp_config_path = os.path.join(self._workdir, "mcp-config.json")
+        self._settings_path = os.path.join(self._workdir, "cli-settings.json")
 
-    def send_prompt(self, prompt, model="", skip_permissions=False, attachments=None):
+    def send_prompt(self, prompt, model="", extended_tools=False, attachments=None):
         if self.running:
             self.error.emit("A turn is already running.")
             return False
@@ -93,7 +109,8 @@ class ClaudeRunner(AgentRunner):
                 "(run `claude` then /login) with your subscription."
             )
             return False
-        self._write_mcp_config()
+        extended_tools = bool(extended_tools)
+        self._write_mcp_config(permission_tool=extended_tools)
         attachments = list(attachments or [])
 
         program, prepend = _claude_launch_command(claude)
@@ -106,18 +123,24 @@ class ClaudeRunner(AgentRunner):
             "--setting-sources=",
             "--append-system-prompt", SYSTEM_PROMPT,
         ]
-        self.unrestricted = bool(skip_permissions)
-        if skip_permissions:
-            args += ["--tools", "default", "--dangerously-skip-permissions"]
+        if extended_tools:
+            tools = "default"
         else:
-            args += ["--tools", "Read" if attachments else "", "--permission-mode", "default"]
-            allowed = [FREECAD_TOOLS]
-            if attachments:
-                # Let the agent read the attached files, and nothing else.
-                allowed.append("Read(./%s/**)" % ATTACHMENTS_SUBDIR)
-                if not IS_WINDOWS:
-                    allowed.append("Read(/%s/**)" % self.attachments_dir.lstrip("/"))
-            args += ["--allowedTools", ",".join(allowed)]
+            tools = "Read" if attachments else ""
+        args += ["--tools", tools, "--permission-mode", "default"]
+        allowed = [FREECAD_TOOLS]
+        if attachments:
+            # Let the agent read the attached files without asking.
+            allowed.append("Read(./%s/**)" % ATTACHMENTS_SUBDIR)
+            if not IS_WINDOWS:
+                allowed.append("Read(/%s/**)" % self.attachments_dir.lstrip("/"))
+        args += ["--allowedTools", ",".join(allowed)]
+        if extended_tools:
+            self._write_settings()
+            args += [
+                "--settings", self._settings_path,
+                "--permission-prompt-tool", PERMISSION_PROMPT_TOOL,
+            ]
         if model:
             args += ["--model", model]
         if self.session_id:
@@ -133,7 +156,26 @@ class ClaudeRunner(AgentRunner):
 
     # --- internal ---------------------------------------------------------
 
-    def _write_mcp_config(self):
+    def _write_settings(self):
+        """CLI settings for a turn with the agent's other tools: only the
+        PreToolUse hook that sends every tool call to FreeCAD for approval."""
+        hook = os.path.join(os.path.dirname(__file__), "permission_hook.py")
+        python_cmd, python_prepend = bridge_command()
+        parts = [python_cmd] + python_prepend + [hook, self.attachments_dir]
+        if IS_WINDOWS:
+            # Claude Code runs hooks through a POSIX shell (Git Bash).
+            parts = [part.replace("\\", "/") for part in parts]
+        command = " ".join(_shell_quote(part) for part in parts)
+        settings = {
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "*", "hooks": [{"type": "command", "command": command}]}
+                ]
+            }
+        }
+        self._write_private_json(self._settings_path, settings)
+
+    def _write_mcp_config(self, permission_tool=False):
         """Write the MCP server declaration (carries the RPC token) as a
         file readable only by the current user."""
         bridge = os.path.join(os.path.dirname(__file__), "mcp_bridge.py")
@@ -146,6 +188,7 @@ class ClaudeRunner(AgentRunner):
                     "env": {
                         "FREECAD_RPC_PORT": str(self.rpc_port),
                         "FREECAD_RPC_TOKEN": self.rpc_token,
+                        "FREECAD_PERMISSION_TOOL": "1" if permission_tool else "0",
                     },
                 }
             }

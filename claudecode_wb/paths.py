@@ -9,7 +9,6 @@ permissions.
 """
 
 import os
-import stat
 import tempfile
 
 _SUBDIR = "ClaudeCodeConnector"
@@ -41,41 +40,6 @@ def private_dir(*parts):
 def new_private_dir(prefix):
     """Create an independent workspace, including across FreeCAD processes."""
     return tempfile.mkdtemp(prefix=prefix, dir=private_dir("sessions"))
-
-
-def trusted_path(path):
-    """Reject files/directories another local user can replace or modify.
-
-    Check both the lexical path and symlink targets. Root-owned sticky system
-    directories (e.g. /tmp) are allowed as ancestors, never as executable files.
-    This is an ownership check, not a vendor signature check.
-    """
-    if not hasattr(os, "getuid"):
-        return False  # ZCode discovery currently supports Linux only.
-    # A container/user namespace may map the filesystem root's owner to a
-    # different UID. Trust that system owner as well as the current user.
-    system_owner = os.stat(os.path.sep).st_uid
-    owners = {0, system_owner, os.getuid()}
-    try:
-        for candidate in (os.path.abspath(path), os.path.realpath(path)):
-            while True:
-                info = os.lstat(candidate)
-                if info.st_uid not in owners:
-                    return False
-                if not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o022:
-                    sticky_root = (
-                        stat.S_ISDIR(info.st_mode) and info.st_uid in {0, system_owner}
-                        and info.st_mode & stat.S_ISVTX
-                    )
-                    if not sticky_root:
-                        return False
-                parent = os.path.dirname(candidate)
-                if parent == candidate:
-                    break
-                candidate = parent
-        return True
-    except OSError:
-        return False
 
 
 def write_private_file(path, text):

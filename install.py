@@ -7,12 +7,12 @@ environment:
 
   - the FreeCAD user Mod directory (auto-detected, overridable with --mod-dir)
   - the required FreeCAD version (from package.xml, <freecadmin>)
-  - an agent CLI: `claude` and/or ZCode Desktop (warning only)
+  - the agent CLI: `claude` (Claude Code, warning only)
   - a Python interpreter usable by the MCP bridge (warning only)
 
-A missing agent CLI can be installed from this script: the installer offers
-it interactively (when run in a terminal), or unconditionally with
---install-claude / --install-zcode.
+A missing `claude` CLI can be installed from this script: the installer
+offers it interactively (when run in a terminal), or unconditionally with
+--install-claude.
 
 Usage:
   python3 install.py             # Linux/macOS
@@ -20,13 +20,10 @@ Usage:
   python3 install.py --copy      # force a copy instead of a symlink
   python3 install.py --mod-dir /path/to/Mod
   python3 install.py --install-claude   # install the claude CLI (official installer)
-  python3 install.py --install-zcode    # download the ZCode Desktop AppImage
   python3 install.py --uninstall
 """
 
 import argparse
-import contextlib
-import glob
 import os
 import platform
 import shutil
@@ -40,7 +37,6 @@ REQUIRED_FREECAD_MINOR = 1  # FreeCAD >= 1.1 (read below from package.xml)
 
 CLAUDE_INSTALL_SH = "curl -fsSL https://claude.ai/install.sh | bash"
 CLAUDE_INSTALL_PS = "irm https://claude.ai/install.ps1 | iex"
-ZCODE_DOWNLOAD_PAGE = "https://zcode.z.ai/en/docs/install"
 
 
 def _fail(message):
@@ -168,40 +164,6 @@ def check_claude_cli():
     return False
 
 
-def check_zcode_cli():
-    """Best-effort detection of the ZCode CLI (bundled with ZCode Desktop).
-
-    Mirrors zcode_runner.find_zcode() but stays dependency-free so the
-    installer can run with any Python. Linux only for now.
-    """
-    if platform.system() != "Linux":
-        return False
-    from claudecode_wb.paths import trusted_path
-
-    explicit = os.environ.get("ZCODE_APPIMAGE")
-    if explicit:
-        if os.path.exists(explicit) and trusted_path(explicit):
-            _ok("ZCode CLI via ZCODE_APPIMAGE: %s" % explicit)
-            return True
-        _warn("ZCODE_APPIMAGE is missing or not protected against other users.")
-        return False
-    home = os.path.expanduser("~")
-    for directory in ("~/Applications", "~/Downloads", "~/.local/bin", "/opt"):
-        base = os.path.expanduser(directory)
-        appimages = [path for path in glob.glob(os.path.join(base, "ZCode*.AppImage"))
-                     if os.path.isfile(path) and os.access(path, os.X_OK) and trusted_path(path)]
-        if appimages:
-            _ok("ZCode AppImage found: %s" % appimages[0])
-            return True
-    _warn(
-        "ZCode not found (looked for protected ZCode*.AppImage files in "
-        "~/Applications, ~/Downloads, ~/.local/bin, /opt, "
-        "and the ZCODE_APPIMAGE variable). Install ZCode Desktop to use it "
-        "as the panel's agent."
-    )
-    return False
-
-
 # --- agent CLI installation ---------------------------------------------
 
 def _ask(question):
@@ -241,75 +203,6 @@ def install_claude_code():
         "log in (/login) with your subscription."
     )
     return True
-
-
-def install_zcode_desktop():
-    """Download the ZCode Desktop AppImage from the official CDN (Linux)."""
-    if platform.system() != "Linux":
-        _warn(
-            "automated ZCode Desktop install is Linux-only — get your "
-            "platform build at https://zcode.z.ai"
-        )
-        return False
-    url = _zcode_appimage_url()
-    if not url:
-        _warn(
-            "could not locate the ZCode AppImage download URL — download it "
-            "manually from %s" % ZCODE_DOWNLOAD_PAGE
-        )
-        return False
-    target_dir = os.path.expanduser("~/Applications")
-    os.makedirs(target_dir, exist_ok=True)
-    target = os.path.join(target_dir, os.path.basename(url))
-    print("Downloading %s" % url)
-    try:
-        import urllib.request
-
-        with urllib.request.urlopen(url, timeout=120) as resp, \
-                open(target + ".part", "wb") as out:
-            total = int(resp.headers.get("Content-Length") or 0)
-            done = 0
-            while True:
-                chunk = resp.read(1 << 20)
-                if not chunk:
-                    break
-                out.write(chunk)
-                done += len(chunk)
-                if total:
-                    print("\r  %d / %d MB" % (done >> 20, total >> 20),
-                          end="", flush=True)
-        os.replace(target + ".part", target)
-    except Exception as exc:  # noqa: BLE001 — report any download failure
-        with contextlib.suppress(OSError):
-            os.remove(target + ".part")
-        _warn("ZCode download failed: %s" % exc)
-        return False
-    os.chmod(target, 0o755)
-    print("\n  [ok] %s" % target)
-    print(
-        "  Launch it once and log in with your Z.AI coding plan — the addon "
-        "detects it automatically after that."
-    )
-    return True
-
-
-def _zcode_appimage_url():
-    """Current ZCode Linux AppImage URL, read off the official download page
-    (the CDN only exposes version-pinned URLs)."""
-    try:
-        import re
-        import urllib.request
-
-        with urllib.request.urlopen(ZCODE_DOWNLOAD_PAGE, timeout=30) as resp:
-            html = resp.read().decode("utf-8", "replace")
-        match = re.search(
-            r"https://cdn-zcode\.z\.ai/[^\s\"'<>]*linux-x64/"
-            r"ZCode-[\d.]+-linux-x64\.AppImage",
-            html,
-        )
-        return match.group(0) if match else None
-    except Exception:
-        return None
 
 
 def check_bridge_python():
@@ -363,8 +256,6 @@ def main():
     parser.add_argument("--copy", action="store_true", help="copy files instead of symlinking (default on Windows)")
     parser.add_argument("--install-claude", action="store_true",
                         help="install the claude CLI with Anthropic's official installer")
-    parser.add_argument("--install-zcode", action="store_true",
-                        help="download the ZCode Desktop AppImage into ~/Applications (Linux)")
     parser.add_argument("--uninstall", action="store_true", help="remove the addon from the Mod directory")
     args = parser.parse_args()
 
@@ -400,19 +291,9 @@ def main():
     print("Checking environment:")
     check_freecad(mod_dir)
     has_claude = check_claude_cli()
-    has_zcode = check_zcode_cli()
-    if not has_claude and not has_zcode:
-        _warn(
-            "no agent CLI found at all — the panel needs at least one of "
-            "Claude Code or ZCode to drive FreeCAD."
-        )
     if args.install_claude or (not has_claude and _ask("Install Claude Code now?")):
         if install_claude_code():
             check_claude_cli()
-    if args.install_zcode or (not has_zcode and platform.system() == "Linux"
-                              and _ask("Download ZCode Desktop now?")):
-        if install_zcode_desktop():
-            check_zcode_cli()
     check_bridge_python()
 
     if not os.path.isdir(mod_dir):
