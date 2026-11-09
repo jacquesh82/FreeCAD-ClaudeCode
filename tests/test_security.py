@@ -76,7 +76,8 @@ def test_claude_tool_configuration_is_explicit(qapp, monkeypatch, attached, exte
             hook = settings["hooks"]["PreToolUse"][0]
             assert hook["matcher"] == "*"
             assert "permission_hook.py" in hook["hooks"][0]["command"]
-            assert stat.S_IMODE(os.stat(settings_path).st_mode) & 0o077 == 0
+            if os.name == "posix":
+                assert stat.S_IMODE(os.stat(settings_path).st_mode) & 0o077 == 0
         else:
             assert "--permission-prompt-tool" not in launched
             assert "--settings" not in launched
